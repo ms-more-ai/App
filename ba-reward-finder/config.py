@@ -46,6 +46,11 @@ class AppConfig:
     children: int
     cabin_classes: list[str]
 
+    # Date range boundaries (stored so the JSON round-trip preserves them;
+    # months list is the authoritative source used by the scraper)
+    start_month: str = ""   # "YYYY-MM" — informational / used to recompute months
+    end_month: str = ""     # "YYYY-MM" — informational / used to recompute months
+
     # Rate-limiting / retry
     delay_min: int = 10
     delay_max: int = 30
@@ -100,6 +105,11 @@ def config_from_json(path_or_json: str | Path) -> AppConfig:
     Deserialise an AppConfig from either:
       - a raw JSON string, or
       - a path to a JSON file written by AppConfig.to_json_file().
+
+    After loading the JSON, this function also calls load_dotenv() and
+    backfills any empty credential fields from the .env file.  This
+    ensures the scraper subprocess always has credentials even if the
+    parent process failed to embed them in the JSON.
     """
     import logging
 
@@ -126,13 +136,59 @@ def config_from_json(path_or_json: str | Path) -> AppConfig:
     data = json.loads(raw)
     logger.info("JSON keys present: %s", list(data.keys()))
 
-    # Check credential fields before constructing
+    # ------------------------------------------------------------------
+    # Load .env so credentials are available in this process too
+    # ------------------------------------------------------------------
+    logger.info("Loading .env from %s", _ENV_PATH)
+    load_dotenv(_ENV_PATH)
+
+    env_api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    env_ba_email = os.getenv("BA_EMAIL", "")
+    env_ba_password = os.getenv("BA_PASSWORD", "")
+
+    logger.info(".env ANTHROPIC_API_KEY: %s",
+                f"present ({len(env_api_key)} chars)" if env_api_key else "EMPTY")
+    logger.info(".env BA_EMAIL: %s",
+                f"present ({env_ba_email})" if env_ba_email else "EMPTY")
+    logger.info(".env BA_PASSWORD: %s",
+                f"present ({len(env_ba_password)} chars)" if env_ba_password else "EMPTY")
+
+    # Backfill empty credentials from .env
+    if not data.get("anthropic_api_key"):
+        logger.warning("JSON anthropic_api_key is empty — backfilling from .env")
+        data["anthropic_api_key"] = env_api_key
+    if not data.get("ba_email"):
+        logger.warning("JSON ba_email is empty — backfilling from .env")
+        data["ba_email"] = env_ba_email
+    if not data.get("ba_password"):
+        logger.warning("JSON ba_password is empty — backfilling from .env")
+        data["ba_password"] = env_ba_password
+
+    # Final check — log what we ended up with
     for key in ("anthropic_api_key", "ba_email", "ba_password"):
         val = data.get(key, "")
         if not val:
-            logger.error("Config JSON field '%s' is EMPTY", key)
+            logger.error("Config field '%s' is STILL EMPTY after .env backfill", key)
         else:
-            logger.info("Config JSON field '%s': present (%d chars)", key, len(val))
+            logger.info("Config field '%s': present (%d chars)", key, len(val))
+
+    # ------------------------------------------------------------------
+    # If months list is missing but start_month/end_month are present,
+    # compute it automatically
+    # ------------------------------------------------------------------
+    if not data.get("months") and data.get("start_month") and data.get("end_month"):
+        logger.info("months list missing — computing from start_month=%s end_month=%s",
+                     data["start_month"], data["end_month"])
+        data["months"] = _expand_months(data["start_month"], data["end_month"])
+
+    # Strip any keys that AppConfig doesn't accept (future-proofing)
+    import dataclasses
+    valid_fields = {f.name for f in dataclasses.fields(AppConfig)}
+    unknown = set(data.keys()) - valid_fields
+    if unknown:
+        logger.warning("Dropping unknown JSON keys not in AppConfig: %s", unknown)
+        for k in unknown:
+            del data[k]
 
     cfg = AppConfig(**data)
     logger.info("AppConfig constructed successfully")

@@ -307,6 +307,8 @@ if st.sidebar.button("Run Search", type="primary", use_container_width=True):
         adults=int(adults),
         children=int(children),
         cabin_classes=cabin_classes,
+        start_month=start_str,
+        end_month=end_str,
         db_path=DEFAULT_DB_PATH,
     )
 
