@@ -169,9 +169,10 @@ empty JSON array: []
 
 Important:
 - Only look at Avios / reward availability, NOT cash fares.
-- If you see a high demand or queue page on the BA website, wait 30 seconds and
-  then refresh the page. Do NOT treat queue pages as CAPTCHAs — they are
-  temporary and will resolve on their own after a short wait.
+- If you see a page saying "high demand", "queue", "waiting room", or
+  "please wait", this is a temporary BA queue page — NOT a CAPTCHA. Wait
+  30 seconds, then refresh the page and continue with the task. Never give up
+  on a queue page; keep waiting and refreshing until the queue clears.
 - If a real CAPTCHA or security challenge appears that you cannot solve (e.g. a
   visual puzzle, reCAPTCHA, or "verify you are human" prompt), stop and return
   the text "CAPTCHA_BLOCKED" so the orchestrator can handle it.
@@ -237,7 +238,7 @@ async def _run_single_search(
 
     last_error: str | None = None
     captcha_retries = 0
-    max_captcha_retries = 3
+    max_captcha_retries = 5
 
     attempt = 0
     while attempt < cfg.max_retries:
