@@ -169,8 +169,12 @@ empty JSON array: []
 
 Important:
 - Only look at Avios / reward availability, NOT cash fares.
-- If a CAPTCHA or security challenge appears that you cannot solve, stop and
-  return the text "CAPTCHA_BLOCKED" so the orchestrator can handle it.
+- If you see a high demand or queue page on the BA website, wait 30 seconds and
+  then refresh the page. Do NOT treat queue pages as CAPTCHAs — they are
+  temporary and will resolve on their own after a short wait.
+- If a real CAPTCHA or security challenge appears that you cannot solve (e.g. a
+  visual puzzle, reCAPTCHA, or "verify you are human" prompt), stop and return
+  the text "CAPTCHA_BLOCKED" so the orchestrator can handle it.
 - Do NOT navigate away from ba.com.
 """
 
@@ -232,8 +236,12 @@ async def _run_single_search(
     logger.info("-" * 60)
 
     last_error: str | None = None
+    captcha_retries = 0
+    max_captcha_retries = 3
 
-    for attempt in range(1, cfg.max_retries + 1):
+    attempt = 0
+    while attempt < cfg.max_retries:
+        attempt += 1
         logger.info("[Attempt %d/%d] %s → %s %s", attempt, cfg.max_retries,
                      cfg.origin, destination, month)
 
@@ -300,12 +308,26 @@ async def _run_single_search(
                 last_error = "Agent returned empty final result"
                 continue  # retry
 
-            # Check for CAPTCHA signal
+            # Check for CAPTCHA signal — retry up to 3 times with 60 s waits
             if "CAPTCHA_BLOCKED" in final_text:
-                logger.warning("  CAPTCHA detected for %s %s — skipping (no retry)",
-                               destination, month)
-                log_run(cfg.db_path, destination, month, "error", "CAPTCHA_BLOCKED")
-                return  # Don't retry CAPTCHAs
+                captcha_retries += 1
+                if captcha_retries <= max_captcha_retries:
+                    logger.warning(
+                        "  CAPTCHA detected for %s %s — waiting 60 s then retrying "
+                        "(captcha retry %d/%d)",
+                        destination, month,
+                        captcha_retries, max_captcha_retries,
+                    )
+                    await asyncio.sleep(60)
+                    attempt -= 1  # don't consume a normal retry for CAPTCHA
+                    continue
+                else:
+                    logger.error(
+                        "  CAPTCHA detected for %s %s — all %d captcha retries exhausted",
+                        destination, month, max_captcha_retries,
+                    )
+                    log_run(cfg.db_path, destination, month, "error", "CAPTCHA_BLOCKED")
+                    return
 
             # --- Parse structured results ---
             logger.info("  Parsing JSON from agent output …")
