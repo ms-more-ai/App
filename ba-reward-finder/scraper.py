@@ -329,7 +329,7 @@ async def _run_single_search(
                 last_error = "Agent returned empty final result"
                 continue  # retry
 
-            # Check for CAPTCHA signal — retry up to 3 times with 60 s waits
+            # Check for CAPTCHA signal — retry up to 5 times with 60 s waits
             if "CAPTCHA_BLOCKED" in final_text:
                 captcha_retries += 1
                 if captcha_retries <= max_captcha_retries:
