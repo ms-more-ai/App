@@ -69,14 +69,18 @@ def _build_task_prompt(
     if cfg.children > 0:
         children_clause = f" and {cfg.children} {'child' if cfg.children == 1 else 'children'}"
 
-    return f"""Go to https://www.britishairways.com and accept any cookie banners.
+    return f"""Go directly to this URL — the BA Executive Club reward flight search page:
+https://www.britishairways.com/travel/flightfinder/execclub/_gf/en_gb?eId=100001
 
-Log in with email "{cfg.ba_email}" and password "{cfg.ba_password}".
-If already logged in, skip the login step.
+Accept any cookie banners that appear.
 
-Navigate to the "Book with Avios" or reward flight search page.
+If the page asks you to log in (or redirects to a login page), log in with
+email "{cfg.ba_email}" and password "{cfg.ba_password}", then return to the
+reward flight search page at the URL above.
+If you are already logged in, skip the login step.
 
-Search for **Avios reward flights** (not cash flights) with these parameters:
+You should now be on the Avios reward flight search form. Fill in the search
+fields with these parameters:
   - From: {cfg.origin}
   - To: {destination}
   - Departure date range: {start_date} to {end_date} ({month_label})
@@ -84,7 +88,7 @@ Search for **Avios reward flights** (not cash flights) with these parameters:
   - Trip type: Return
   - Travel duration: between {cfg.travel_duration_min} and {cfg.travel_duration_max} days
 
-Check availability for these cabin classes: {cabin_labels}.
+Submit the search and check availability for these cabin classes: {cabin_labels}.
 
 For **each available departure date** you find, extract:
   - departure_date (YYYY-MM-DD)
