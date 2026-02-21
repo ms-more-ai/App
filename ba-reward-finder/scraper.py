@@ -23,7 +23,7 @@ from calendar import monthrange
 from datetime import datetime
 from pathlib import Path
 
-from browser_use import Agent, Browser, ChatAnthropic
+from browser_use import Agent, Browser, BrowserProfile, ChatAnthropic
 
 from config import AppConfig, config_from_json, load_credentials, _expand_months, DEFAULT_DB_PATH
 from database import init_db, log_run, upsert_result
@@ -255,9 +255,30 @@ async def _run_single_search(
             )
             logger.info("  LLM created successfully")
 
-            # --- Browser setup (cloud browser for anti-detection) ---
-            logger.info("  Creating cloud Browser (use_cloud=True)")
-            browser = Browser(use_cloud=True)
+            # --- Browser setup (local browser with stealth settings) ---
+            logger.info("  Creating local Browser (headless=False, stealth args)")
+            browser_profile = BrowserProfile(
+                headless=False,
+                window_size={"width": 1280, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding",
+                ],
+                ignore_default_args=[
+                    "--enable-automation",
+                ],
+            )
+            browser = Browser(browser_profile=browser_profile)
             logger.info("  Browser created successfully")
 
             # --- Agent setup ---
@@ -314,17 +335,7 @@ async def _run_single_search(
                         destination, month,
                         captcha_retries, max_captcha_retries,
                     )
-                    print(
-                        "\n"
-                        "=" * 60 + "\n"
-                        "CAPTCHA detected! Please open the browser window,\n"
-                        "solve the CAPTCHA manually, then come back to\n"
-                        "Terminal and press Enter to continue.\n"
-                        "=" * 60
-                    )
-                    await asyncio.get_event_loop().run_in_executor(
-                        None, input,
-                    )
+                    input("CAPTCHA detected! Please open the browser window, solve the CAPTCHA manually, then come back to Terminal and press Enter to continue...")
                     attempt -= 1  # don't consume a normal retry for CAPTCHA
                     continue
                 else:
