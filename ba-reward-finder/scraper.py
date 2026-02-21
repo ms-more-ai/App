@@ -255,11 +255,31 @@ async def _run_single_search(
             )
             logger.info("  LLM created successfully")
 
-            # --- Browser setup ---
-            logger.info("  Creating Browser with headless=True, viewport=1280x900")
+            # --- Browser setup (with anti-detection measures) ---
+            logger.info("  Creating Browser with headless=True, viewport=1280x900, stealth args")
+            # To use Browser Use Cloud (paid, best anti-detection), set
+            # BROWSER_USE_API_KEY in env and uncomment use_cloud below.
             browser_profile = BrowserProfile(
                 headless=True,
+                # use_cloud=True,
                 window_size={"width": 1280, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding",
+                ],
+                ignore_default_args=[
+                    "--enable-automation",
+                ],
             )
             browser = Browser(browser_profile=browser_profile)
             logger.info("  Browser created successfully")
