@@ -173,6 +173,22 @@ def config_from_json(path_or_json: str | Path) -> AppConfig:
             logger.info("Config field '%s': present (%d chars)", key, len(val))
 
     # ------------------------------------------------------------------
+    # Map alternate key names to the canonical AppConfig field names
+    # ------------------------------------------------------------------
+    _ALIASES = {
+        "min_days": "travel_duration_min",
+        "max_days": "travel_duration_max",
+    }
+    for alt, canonical in _ALIASES.items():
+        if alt in data and canonical not in data:
+            logger.info("Mapping JSON key '%s' → '%s'", alt, canonical)
+            data[canonical] = data.pop(alt)
+        elif alt in data and canonical in data:
+            logger.info("Both '%s' and '%s' present — keeping '%s', dropping '%s'",
+                         alt, canonical, canonical, alt)
+            del data[alt]
+
+    # ------------------------------------------------------------------
     # If months list is missing but start_month/end_month are present,
     # compute it automatically
     # ------------------------------------------------------------------
