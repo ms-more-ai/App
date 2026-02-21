@@ -250,8 +250,7 @@ async def _run_single_search(
             logger.info("  Creating Browser with headless=True, viewport=1280x900")
             browser_profile = BrowserProfile(
                 headless=True,
-                window_width=1280,
-                window_height=900,
+                window_size={"width": 1280, "height": 900},
             )
             browser = Browser(browser_profile=browser_profile)
             logger.info("  Browser created successfully")
