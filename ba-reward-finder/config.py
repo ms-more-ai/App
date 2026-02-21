@@ -95,21 +95,31 @@ def load_credentials() -> tuple[str, str, str]:
     return anthropic_api_key, ba_email, ba_password
 
 
-def config_from_json(path: str | Path) -> AppConfig:
-    """Deserialise an AppConfig from a JSON file written by AppConfig.to_json_file()."""
+def config_from_json(path_or_json: str | Path) -> AppConfig:
+    """
+    Deserialise an AppConfig from either:
+      - a raw JSON string, or
+      - a path to a JSON file written by AppConfig.to_json_file().
+    """
     import logging
 
     logger = logging.getLogger("ba_scraper.config")
 
-    resolved = Path(path).resolve()
-    logger.info("Reading config JSON from: %s", resolved)
+    text = str(path_or_json).strip()
 
-    if not resolved.exists():
-        logger.error("Config file does not exist: %s", resolved)
-        raise FileNotFoundError(f"Config file not found: {resolved}")
-
-    with open(resolved, "r") as f:
-        raw = f.read()
+    # Detect whether the argument is a JSON string or a file path.
+    # JSON objects start with '{'; file paths never do.
+    if text.startswith("{"):
+        logger.info("config_from_json: input looks like a JSON string (%d chars)", len(text))
+        raw = text
+    else:
+        resolved = Path(text).resolve()
+        logger.info("config_from_json: input looks like a file path: %s", resolved)
+        if not resolved.exists():
+            logger.error("Config file does not exist: %s", resolved)
+            raise FileNotFoundError(f"Config file not found: {resolved}")
+        with open(resolved, "r") as f:
+            raw = f.read()
 
     logger.debug("Raw JSON content (%d chars):\n%s", len(raw), raw)
 
