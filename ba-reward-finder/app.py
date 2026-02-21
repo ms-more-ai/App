@@ -1,57 +1,53 @@
 """
 app.py — Streamlit frontend for the BA Reward Flight Finder.
 
+All search settings are configured via the sidebar — no config.yaml needed.
+When the user clicks "Run Search", the app builds an AppConfig from the UI
+inputs, serialises it to a temp JSON file, and launches scraper.py as a
+subprocess.
+
 Displays search results from SQLite with:
   - A summary table (destination, earliest date, lowest Avios, cabins).
   - Per-destination calendar heatmaps (Plotly) coloured by cabin class.
   - Clickable dates linking to the BA search result page.
-  - A "Run new search" button that triggers scraper.py.
 
 Launch:  streamlit run app.py
 """
 
 from __future__ import annotations
 
-import asyncio
 import subprocess
 import sys
-from datetime import datetime, timedelta
+import tempfile
+from datetime import date, datetime
 from pathlib import Path
-from calendar import monthrange
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from config import load_config
+from config import (
+    DEFAULT_DB_PATH,
+    AppConfig,
+    _expand_months,
+    load_credentials,
+)
 from database import fetch_all_results, fetch_run_log, fetch_summary, init_db
 
 # ---------------------------------------------------------------------------
-# Page config
+# Page config & DB init
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="BA Reward Finder", layout="wide")
-
-# ---------------------------------------------------------------------------
-# Ensure the DB exists
-# ---------------------------------------------------------------------------
-_cfg = load_config()
-init_db(_cfg.db_path)
-
+init_db(DEFAULT_DB_PATH)
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _make_clickable(url: str | None, label: str) -> str:
-    """Return an HTML anchor tag if a URL is provided."""
     if url:
         return f'<a href="{url}" target="_blank">{label}</a>'
     return label
-
-
-def _cabin_colour(cabin: str) -> str:
-    """Map cabin class to a display colour."""
-    return {"economy": "#2ecc71", "business": "#3498db"}.get(cabin, "#95a5a6")
 
 
 def _cabin_label(cabin: str) -> str:
@@ -59,7 +55,7 @@ def _cabin_label(cabin: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Calendar heatmap builder
+# Calendar heatmap builder (unchanged from before)
 # ---------------------------------------------------------------------------
 
 def _build_calendar_heatmap(
@@ -67,14 +63,12 @@ def _build_calendar_heatmap(
     destination: str,
 ) -> go.Figure:
     """
-    Build a month-grid calendar heatmap for a single destination.
+    Month-grid calendar heatmap for a single destination.
 
-    Colour coding:
-      Green  = economy only
-      Blue   = business only
-      Purple = both cabins available on the same date
+    Green  = economy only
+    Blue   = business only
+    Purple = both cabins on the same date
     """
-
     if df_dest.empty:
         fig = go.Figure()
         fig.update_layout(title=f"{destination} — no results")
@@ -83,14 +77,12 @@ def _build_calendar_heatmap(
     df_dest = df_dest.copy()
     df_dest["date"] = pd.to_datetime(df_dest["departure_date"])
 
-    # Determine colour per date based on which cabins are available
     date_cabins: dict[str, set[str]] = {}
     date_avios: dict[str, int | None] = {}
     date_urls: dict[str, str | None] = {}
     for _, row in df_dest.iterrows():
         d = row["departure_date"]
         date_cabins.setdefault(d, set()).add(row["cabin_class"])
-        # Keep the lowest Avios for hover
         current = date_avios.get(d)
         avios = row["avios_per_person"]
         if current is None or (avios is not None and avios < current):
@@ -104,21 +96,18 @@ def _build_calendar_heatmap(
         fig.update_layout(title=f"{destination} — no results")
         return fig
 
-    # Build calendar grid data
-    # We'll create a scatter plot positioned by (week_in_month, day_of_week)
-    # grouped by month
     all_dates = []
     for d_str in dates_sorted:
         d = datetime.strptime(d_str, "%Y-%m-%d")
         cabins = date_cabins[d_str]
         if "economy" in cabins and "business" in cabins:
-            colour = "#9b59b6"  # purple — both
+            colour = "#9b59b6"
             cabin_text = "Economy + Business"
         elif "business" in cabins:
-            colour = "#3498db"  # blue
+            colour = "#3498db"
             cabin_text = "Business (CW)"
         else:
-            colour = "#2ecc71"  # green
+            colour = "#2ecc71"
             cabin_text = "Economy (WT)"
 
         avios = date_avios.get(d_str)
@@ -133,37 +122,28 @@ def _build_calendar_heatmap(
                 "avios_text": avios_text,
                 "url": date_urls.get(d_str, ""),
                 "month_label": d.strftime("%b %Y"),
-                # x = day of week (Mon=0), y = week-of-month (row)
                 "dow": d.weekday(),
                 "wom": (d.day + d.replace(day=1).weekday() - 1) // 7,
             }
         )
 
     adf = pd.DataFrame(all_dates)
-
-    # One subplot per month, arranged horizontally
     months_present = adf["month_label"].unique().tolist()
 
     fig = go.Figure()
-
     x_offset = 0
-    tick_vals = []
-    tick_labels = []
+    tick_vals: list[float] = []
+    tick_labels: list[str] = []
 
-    for mi, mlabel in enumerate(months_present):
+    for mlabel in months_present:
         mdf = adf[adf["month_label"] == mlabel]
-
-        # x positions shifted per month block (each block is 7 cols wide + 1 gap)
         xs = mdf["dow"] + x_offset
-        ys = -mdf["wom"]  # invert so week 0 is at top
+        ys = -mdf["wom"]
 
         hover = [
             f"{r['date_str']}<br>{r['cabin_text']}<br>{r['avios_text']}"
             for _, r in mdf.iterrows()
         ]
-
-        # Custom data for click-through URLs
-        custom = mdf["url"].tolist()
 
         fig.add_trace(
             go.Scatter(
@@ -180,67 +160,200 @@ def _build_calendar_heatmap(
                 textfont=dict(color="white", size=10),
                 hovertext=hover,
                 hoverinfo="text",
-                customdata=custom,
+                customdata=mdf["url"].tolist(),
                 showlegend=False,
             )
         )
 
-        # Month label position
         tick_vals.append(x_offset + 3)
         tick_labels.append(mlabel)
-        x_offset += 8  # 7 days + gap
+        x_offset += 8
 
     fig.update_layout(
-        title=f"✈ {destination} — Reward Availability",
-        xaxis=dict(
-            tickvals=tick_vals,
-            ticktext=tick_labels,
-            showgrid=False,
-        ),
+        title=f"{destination} — Reward Availability",
+        xaxis=dict(tickvals=tick_vals, ticktext=tick_labels, showgrid=False),
         yaxis=dict(visible=False, showgrid=False),
         height=280,
         margin=dict(l=20, r=20, t=50, b=30),
         plot_bgcolor="white",
     )
-
     return fig
 
 
-# ---------------------------------------------------------------------------
-# Main UI
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Sidebar — search configuration
+# ===========================================================================
+
+st.sidebar.header("Search Settings")
+
+# --- Origin ---
+origin = st.sidebar.text_input("Origin airport code", value="LHR", max_chars=5)
+
+# --- Destinations (dynamic list) ---
+st.sidebar.subheader("Destinations")
+
+if "destinations" not in st.session_state:
+    st.session_state.destinations = ["JFK"]
+
+def _add_destination() -> None:
+    st.session_state.destinations.append("")
+
+def _remove_destination(idx: int) -> None:
+    st.session_state.destinations.pop(idx)
+
+for i, dest_val in enumerate(st.session_state.destinations):
+    cols = st.sidebar.columns([3, 1])
+    st.session_state.destinations[i] = cols[0].text_input(
+        f"Destination {i + 1}",
+        value=dest_val,
+        max_chars=5,
+        key=f"dest_{i}",
+        label_visibility="collapsed",
+    )
+    if len(st.session_state.destinations) > 1:
+        cols[1].button(
+            "X", key=f"rm_dest_{i}",
+            on_click=_remove_destination, args=(i,),
+        )
+
+st.sidebar.button("+ Add destination", on_click=_add_destination)
+
+# --- Date range ---
+st.sidebar.subheader("Date Range")
+today = date.today()
+default_start = today.replace(day=1)
+# Default end: 6 months from now
+if today.month + 6 > 12:
+    default_end = today.replace(year=today.year + 1, month=(today.month + 6) - 12, day=1)
+else:
+    default_end = today.replace(month=today.month + 6, day=1)
+
+start_month = st.sidebar.date_input(
+    "Start month",
+    value=default_start,
+    help="Only the year and month are used",
+)
+end_month = st.sidebar.date_input(
+    "End month",
+    value=default_end,
+    help="Only the year and month are used",
+)
+
+# --- Trip duration ---
+st.sidebar.subheader("Trip Duration (days)")
+dur_cols = st.sidebar.columns(2)
+min_days = dur_cols[0].number_input("Min", min_value=1, max_value=90, value=5)
+max_days = dur_cols[1].number_input("Max", min_value=1, max_value=90, value=14)
+
+# --- Passengers ---
+st.sidebar.subheader("Passengers")
+pax_cols = st.sidebar.columns(2)
+adults = pax_cols[0].number_input("Adults", min_value=1, max_value=9, value=2)
+children = pax_cols[1].number_input("Children", min_value=0, max_value=9, value=0)
+
+# --- Cabin classes ---
+st.sidebar.subheader("Cabin Classes")
+search_economy = st.sidebar.checkbox("Economy (World Traveller)", value=True)
+search_business = st.sidebar.checkbox("Business (Club World)", value=True)
+
+# ===========================================================================
+# Run Search button (sidebar)
+# ===========================================================================
+
+if st.sidebar.button("Run Search", type="primary", use_container_width=True):
+    # --- Validate inputs ---
+    destinations_clean = [d.strip().upper() for d in st.session_state.destinations if d.strip()]
+    if not destinations_clean:
+        st.sidebar.error("Add at least one destination.")
+        st.stop()
+
+    cabin_classes = []
+    if search_economy:
+        cabin_classes.append("economy")
+    if search_business:
+        cabin_classes.append("business")
+    if not cabin_classes:
+        st.sidebar.error("Select at least one cabin class.")
+        st.stop()
+
+    start_str = start_month.strftime("%Y-%m")
+    end_str = end_month.strftime("%Y-%m")
+    if end_str < start_str:
+        st.sidebar.error("End month must be on or after start month.")
+        st.stop()
+
+    if max_days < min_days:
+        st.sidebar.error("Max trip duration must be >= min.")
+        st.stop()
+
+    # --- Load credentials from .env ---
+    try:
+        api_key, ba_email, ba_password = load_credentials()
+    except ValueError as exc:
+        st.sidebar.error(str(exc))
+        st.stop()
+
+    months = _expand_months(start_str, end_str)
+
+    cfg = AppConfig(
+        anthropic_api_key=api_key,
+        ba_email=ba_email,
+        ba_password=ba_password,
+        origin=origin.strip().upper() or "LHR",
+        destinations=destinations_clean,
+        months=months,
+        travel_duration_min=int(min_days),
+        travel_duration_max=int(max_days),
+        adults=int(adults),
+        children=int(children),
+        cabin_classes=cabin_classes,
+        db_path=DEFAULT_DB_PATH,
+    )
+
+    # --- Write config to a temp file and launch scraper ---
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, prefix="ba_cfg_"
+    ) as tmp:
+        cfg.to_json_file(tmp.name)
+        tmp_path = tmp.name
+
+    scraper_path = str(Path(__file__).resolve().parent / "scraper.py")
+
+    with st.spinner(
+        f"Searching {len(destinations_clean)} destination(s) "
+        f"across {len(months)} month(s) — this may take a while …"
+    ):
+        result = subprocess.run(
+            [sys.executable, scraper_path, "--config-json", tmp_path],
+            capture_output=True,
+            text=True,
+        )
+
+    if result.returncode == 0:
+        st.success("Search finished. Results are shown below.")
+    else:
+        st.error(f"Scraper exited with code {result.returncode}")
+        with st.expander("Scraper output"):
+            st.code(result.stderr[-3000:] if result.stderr else "(empty)")
+
+    st.rerun()
+
+# ===========================================================================
+# Main content area — results display
+# ===========================================================================
 
 st.title("BA Reward Flight Finder")
 st.caption("Powered by Browser Use + Claude")
 
-# ---- Run new search button ----
-col_run, col_status = st.columns([1, 3])
-with col_run:
-    if st.button("Run new search"):
-        with col_status:
-            with st.spinner("Scraper running — this may take a while …"):
-                # Launch scraper as a subprocess so Streamlit doesn't block
-                result = subprocess.run(
-                    [sys.executable, str(Path(__file__).resolve().parent / "scraper.py")],
-                    capture_output=True,
-                    text=True,
-                )
-                if result.returncode == 0:
-                    st.success("Scraper finished successfully. Refresh to see new results.")
-                else:
-                    st.error(f"Scraper exited with code {result.returncode}")
-                    with st.expander("Scraper stderr"):
-                        st.code(result.stderr[-3000:] if result.stderr else "(empty)")
-
 st.divider()
 
 # ---- Summary table ----
-summary = fetch_summary(_cfg.db_path)
+summary = fetch_summary(DEFAULT_DB_PATH)
 
 if not summary:
     st.info(
-        "No results in the database yet. Click **Run new search** to start, "
-        "or run `python scraper.py` from the command line."
+        "No results in the database yet. Configure your search in the "
+        "sidebar and click **Run Search** to start."
     )
     st.stop()
 
@@ -254,17 +367,14 @@ st.divider()
 # ---- Per-destination calendar heatmaps ----
 st.subheader("Availability Calendar")
 
-# Legend
 st.markdown(
-    """
-    <span style="color:#2ecc71">&#9632;</span> Economy &nbsp;&nbsp;
-    <span style="color:#3498db">&#9632;</span> Business &nbsp;&nbsp;
-    <span style="color:#9b59b6">&#9632;</span> Both
-    """,
+    '<span style="color:#2ecc71">&#9632;</span> Economy &nbsp;&nbsp;'
+    '<span style="color:#3498db">&#9632;</span> Business &nbsp;&nbsp;'
+    '<span style="color:#9b59b6">&#9632;</span> Both',
     unsafe_allow_html=True,
 )
 
-all_results = fetch_all_results(_cfg.db_path)
+all_results = fetch_all_results(DEFAULT_DB_PATH)
 df = pd.DataFrame(all_results)
 
 if df.empty:
@@ -276,14 +386,11 @@ for dest in sorted(df["destination"].unique()):
     fig = _build_calendar_heatmap(df_dest, dest)
     st.plotly_chart(fig, use_container_width=True)
 
-    # Detail table with clickable links
     with st.expander(f"{dest} — detail table"):
         detail = df_dest[
             ["departure_date", "cabin_class", "avios_per_person", "seats_available", "search_url"]
         ].copy()
-        detail["cabin_class"] = detail["cabin_class"].map(
-            lambda c: _cabin_label(c)
-        )
+        detail["cabin_class"] = detail["cabin_class"].map(_cabin_label)
         detail["link"] = detail.apply(
             lambda r: _make_clickable(r["search_url"], "Open on BA"), axis=1
         )
@@ -295,7 +402,7 @@ st.divider()
 
 # ---- Run log ----
 with st.expander("Recent run log"):
-    log = fetch_run_log(_cfg.db_path)
+    log = fetch_run_log(DEFAULT_DB_PATH)
     if log:
         st.dataframe(pd.DataFrame(log), use_container_width=True, hide_index=True)
     else:

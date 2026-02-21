@@ -23,7 +23,7 @@ from datetime import datetime
 
 from browser_use import Agent, Browser, BrowserProfile, ChatAnthropic
 
-from config import AppConfig, load_config
+from config import AppConfig, config_from_json, load_credentials, _expand_months, DEFAULT_DB_PATH
 from database import init_db, log_run, upsert_result
 
 # ---------------------------------------------------------------------------
@@ -253,14 +253,11 @@ async def _run_single_search(
     log_run(cfg.db_path, destination, month, "error", last_error)
 
 
-async def run_all_searches(cfg: AppConfig | None = None) -> None:
+async def run_all_searches(cfg: AppConfig) -> None:
     """
     Main orchestration loop: iterate over every destination × month,
     running the agent and sleeping between calls.
     """
-    if cfg is None:
-        cfg = load_config()
-
     init_db(cfg.db_path)
 
     total = len(cfg.destinations) * len(cfg.months)
@@ -292,4 +289,16 @@ async def run_all_searches(cfg: AppConfig | None = None) -> None:
 # CLI entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    asyncio.run(run_all_searches())
+    import argparse
+
+    parser = argparse.ArgumentParser(description="BA reward-flight scraper")
+    parser.add_argument(
+        "--config-json",
+        required=True,
+        help="Path to a JSON file containing a serialised AppConfig "
+             "(produced by AppConfig.to_json_file in the Streamlit UI).",
+    )
+    args = parser.parse_args()
+
+    cfg = config_from_json(args.config_json)
+    asyncio.run(run_all_searches(cfg))
