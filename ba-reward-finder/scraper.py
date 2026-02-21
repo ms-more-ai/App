@@ -305,17 +305,26 @@ async def _run_single_search(
                 last_error = "Agent returned empty final result"
                 continue  # retry
 
-            # Check for CAPTCHA signal — retry up to 5 times with 60 s waits
+            # Check for CAPTCHA signal — pause for manual solving
             if "CAPTCHA_BLOCKED" in final_text:
                 captcha_retries += 1
                 if captcha_retries <= max_captcha_retries:
                     logger.warning(
-                        "  CAPTCHA detected for %s %s — waiting 60 s then retrying "
-                        "(captcha retry %d/%d)",
+                        "  CAPTCHA detected for %s %s (captcha retry %d/%d)",
                         destination, month,
                         captcha_retries, max_captcha_retries,
                     )
-                    await asyncio.sleep(60)
+                    print(
+                        "\n"
+                        "=" * 60 + "\n"
+                        "CAPTCHA detected! Please open the browser window,\n"
+                        "solve the CAPTCHA manually, then come back to\n"
+                        "Terminal and press Enter to continue.\n"
+                        "=" * 60
+                    )
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, input,
+                    )
                     attempt -= 1  # don't consume a normal retry for CAPTCHA
                     continue
                 else:
