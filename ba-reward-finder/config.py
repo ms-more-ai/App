@@ -97,6 +97,33 @@ def load_credentials() -> tuple[str, str, str]:
 
 def config_from_json(path: str | Path) -> AppConfig:
     """Deserialise an AppConfig from a JSON file written by AppConfig.to_json_file()."""
-    with open(path, "r") as f:
-        data = json.load(f)
-    return AppConfig(**data)
+    import logging
+
+    logger = logging.getLogger("ba_scraper.config")
+
+    resolved = Path(path).resolve()
+    logger.info("Reading config JSON from: %s", resolved)
+
+    if not resolved.exists():
+        logger.error("Config file does not exist: %s", resolved)
+        raise FileNotFoundError(f"Config file not found: {resolved}")
+
+    with open(resolved, "r") as f:
+        raw = f.read()
+
+    logger.debug("Raw JSON content (%d chars):\n%s", len(raw), raw)
+
+    data = json.loads(raw)
+    logger.info("JSON keys present: %s", list(data.keys()))
+
+    # Check credential fields before constructing
+    for key in ("anthropic_api_key", "ba_email", "ba_password"):
+        val = data.get(key, "")
+        if not val:
+            logger.error("Config JSON field '%s' is EMPTY", key)
+        else:
+            logger.info("Config JSON field '%s': present (%d chars)", key, len(val))
+
+    cfg = AppConfig(**data)
+    logger.info("AppConfig constructed successfully")
+    return cfg

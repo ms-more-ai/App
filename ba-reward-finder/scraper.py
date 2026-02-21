@@ -18,8 +18,10 @@ import json
 import logging
 import random
 import re
+import traceback
 from calendar import monthrange
 from datetime import datetime
+from pathlib import Path
 
 from browser_use import Agent, Browser, BrowserProfile, ChatAnthropic
 
@@ -27,14 +29,18 @@ from config import AppConfig, config_from_json, load_credentials, _expand_months
 from database import init_db, log_run, upsert_result
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging — use DEBUG so every detail is visible
 # ---------------------------------------------------------------------------
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("ba_scraper")
+
+# Quieten noisy third-party loggers but keep them at INFO
+for _lib in ("httpx", "httpcore", "urllib3", "asyncio", "playwright"):
+    logging.getLogger(_lib).setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
 # Cabin-class display names that BA uses on its website
@@ -44,6 +50,56 @@ CABIN_DISPLAY = {
     "business": "Club World (Business)",
 }
 
+
+# ---------------------------------------------------------------------------
+# Credential & config validation
+# ---------------------------------------------------------------------------
+
+def _validate_config(cfg: AppConfig) -> None:
+    """Log a diagnostic summary of the loaded config and check credentials."""
+
+    logger.info("=" * 60)
+    logger.info("CONFIG VALIDATION")
+    logger.info("=" * 60)
+
+    # Anthropic key
+    key = cfg.anthropic_api_key
+    if not key:
+        logger.error("ANTHROPIC_API_KEY is EMPTY — agent will fail")
+    else:
+        logger.info(
+            "ANTHROPIC_API_KEY loaded: %s…%s (length %d)",
+            key[:8], key[-4:], len(key),
+        )
+
+    # BA credentials
+    if not cfg.ba_email:
+        logger.error("BA_EMAIL is EMPTY — login will fail")
+    else:
+        logger.info("BA_EMAIL loaded: %s", cfg.ba_email)
+
+    if not cfg.ba_password:
+        logger.error("BA_PASSWORD is EMPTY — login will fail")
+    else:
+        logger.info("BA_PASSWORD loaded: (%d chars, starts with '%s')",
+                     len(cfg.ba_password), cfg.ba_password[0])
+
+    # Search params
+    logger.info("Origin:        %s", cfg.origin)
+    logger.info("Destinations:  %s", cfg.destinations)
+    logger.info("Months:        %s", cfg.months)
+    logger.info("Duration:      %d–%d days", cfg.travel_duration_min, cfg.travel_duration_max)
+    logger.info("Passengers:    %d adults, %d children", cfg.adults, cfg.children)
+    logger.info("Cabin classes: %s", cfg.cabin_classes)
+    logger.info("Delay:         %d–%d s", cfg.delay_min, cfg.delay_max)
+    logger.info("Max retries:   %d", cfg.max_retries)
+    logger.info("DB path:       %s", cfg.db_path)
+    logger.info("=" * 60)
+
+
+# ---------------------------------------------------------------------------
+# Task prompt builder
+# ---------------------------------------------------------------------------
 
 def _build_task_prompt(
     cfg: AppConfig,
@@ -127,25 +183,39 @@ def _extract_json_from_result(raw: str) -> list[dict] | None:
     markdown fences or adds commentary.  This function handles that.
     """
     if not raw:
+        logger.debug("_extract_json_from_result: input is empty/None")
         return None
+
+    logger.debug("_extract_json_from_result: raw input (%d chars):\n%s", len(raw), raw)
 
     # Strip markdown code fences if present
     cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`")
+    logger.debug("_extract_json_from_result: after stripping fences:\n%s", cleaned)
 
     # Find the outermost JSON array in the string
     match = re.search(r"\[.*\]", cleaned, re.DOTALL)
     if not match:
+        logger.warning("_extract_json_from_result: no JSON array found in output")
         return None
 
+    json_str = match.group(0)
+    logger.debug("_extract_json_from_result: matched JSON (%d chars):\n%s", len(json_str), json_str)
+
     try:
-        data = json.loads(match.group(0))
+        data = json.loads(json_str)
         if isinstance(data, list):
+            logger.info("_extract_json_from_result: parsed %d items from JSON", len(data))
             return data
-    except json.JSONDecodeError:
-        pass
+        logger.warning("_extract_json_from_result: parsed JSON is not a list, got %s", type(data))
+    except json.JSONDecodeError as exc:
+        logger.warning("_extract_json_from_result: JSON decode error: %s", exc)
 
     return None
 
+
+# ---------------------------------------------------------------------------
+# Single search execution
+# ---------------------------------------------------------------------------
 
 async def _run_single_search(
     cfg: AppConfig,
@@ -155,28 +225,39 @@ async def _run_single_search(
     """Run the Browser Use agent for one (destination, month) combination."""
 
     task = _build_task_prompt(cfg, destination, month)
-    logger.info("Starting search: %s → %s for %s", cfg.origin, destination, month)
+
+    logger.info("-" * 60)
+    logger.info("SEARCH START: %s → %s | month=%s", cfg.origin, destination, month)
+    logger.debug("Full task prompt:\n%s", task)
+    logger.info("-" * 60)
 
     last_error: str | None = None
 
     for attempt in range(1, cfg.max_retries + 1):
-        logger.info("  Attempt %d/%d", attempt, cfg.max_retries)
+        logger.info("[Attempt %d/%d] %s → %s %s", attempt, cfg.max_retries,
+                     cfg.origin, destination, month)
 
         try:
-            # --- Set up the LLM and browser ---
+            # --- LLM setup ---
+            logger.info("  Creating ChatAnthropic LLM (model=claude-sonnet-4-20250514)")
             llm = ChatAnthropic(
                 model="claude-sonnet-4-20250514",
                 api_key=cfg.anthropic_api_key,
             )
+            logger.info("  LLM created successfully")
 
+            # --- Browser setup ---
+            logger.info("  Creating Browser with headless=True, viewport=1280x900")
             browser_profile = BrowserProfile(
                 headless=True,
-                # Use a realistic viewport
                 window_width=1280,
                 window_height=900,
             )
             browser = Browser(browser_profile=browser_profile)
+            logger.info("  Browser created successfully")
 
+            # --- Agent setup ---
+            logger.info("  Creating Agent (max_failures=5, use_vision=True)")
             agent = Agent(
                 task=task,
                 llm=llm,
@@ -184,41 +265,72 @@ async def _run_single_search(
                 max_failures=5,
                 use_vision=True,
             )
+            logger.info("  Agent created successfully")
 
-            # Run the agent (allow up to 100 steps for complex navigation)
+            # --- Run ---
+            logger.info("  Running agent (max_steps=100) …")
             history = await agent.run(max_steps=100)
+            logger.info("  Agent run completed")
+
+            # --- Log history summary ---
+            logger.info("  Agent finished: is_done=%s", history.is_done())
+            logger.info("  Total steps in history: %d", len(history.history))
+
+            # Log each step's extracted content for debugging
+            for step_idx, step in enumerate(history.history):
+                step_result = step.result if hasattr(step, "result") else None
+                if step_result:
+                    for action_result in (step_result if isinstance(step_result, list) else [step_result]):
+                        content = getattr(action_result, "extracted_content", None)
+                        error = getattr(action_result, "error", None)
+                        is_done = getattr(action_result, "is_done", False)
+                        if content:
+                            logger.debug("  Step %d content: %.500s", step_idx, content)
+                        if error:
+                            logger.warning("  Step %d error: %s", step_idx, error)
+                        if is_done:
+                            logger.info("  Step %d signalled done", step_idx)
 
             # --- Extract the final result text ---
             final_text = history.final_result() or ""
+            logger.info("  final_result() returned %d chars", len(final_text))
+            logger.info("  final_result() content:\n%s", final_text[:2000])
+
+            if not final_text:
+                logger.warning("  Agent returned EMPTY final result on attempt %d", attempt)
+                last_error = "Agent returned empty final result"
+                continue  # retry
 
             # Check for CAPTCHA signal
             if "CAPTCHA_BLOCKED" in final_text:
-                logger.warning(
-                    "  CAPTCHA detected for %s %s — skipping", destination, month
-                )
+                logger.warning("  CAPTCHA detected for %s %s — skipping (no retry)",
+                               destination, month)
                 log_run(cfg.db_path, destination, month, "error", "CAPTCHA_BLOCKED")
                 return  # Don't retry CAPTCHAs
 
             # --- Parse structured results ---
+            logger.info("  Parsing JSON from agent output …")
             results = _extract_json_from_result(final_text)
 
             if results is None:
-                # Agent returned something unparseable
                 logger.warning(
-                    "  Could not parse JSON from agent output (attempt %d). Raw: %.300s",
+                    "  Could not parse JSON from agent output (attempt %d)",
                     attempt,
-                    final_text,
                 )
-                last_error = f"Unparseable output: {final_text[:300]}"
+                logger.warning("  Raw output was:\n%s", final_text[:2000])
+                last_error = f"Unparseable output: {final_text[:500]}"
                 continue  # retry
 
             if len(results) == 0:
-                logger.info("  No reward availability found for %s %s", destination, month)
+                logger.info("  Agent returned empty array — no reward availability for %s %s",
+                            destination, month)
                 log_run(cfg.db_path, destination, month, "none_found")
                 return
 
             # --- Persist each result row ---
-            for row in results:
+            logger.info("  Saving %d result(s) to database …", len(results))
+            for i, row in enumerate(results):
+                logger.debug("  Result %d: %s", i, json.dumps(row, default=str))
                 upsert_result(
                     db_path=cfg.db_path,
                     destination=destination,
@@ -230,9 +342,8 @@ async def _run_single_search(
                     search_url=row.get("search_url"),
                 )
 
-            logger.info(
-                "  Saved %d result(s) for %s %s", len(results), destination, month
-            )
+            logger.info("  SUCCESS — saved %d result(s) for %s %s",
+                         len(results), destination, month)
             log_run(
                 cfg.db_path,
                 destination,
@@ -242,31 +353,40 @@ async def _run_single_search(
             )
             return  # success — no need to retry
 
-        except Exception as exc:
-            last_error = str(exc)
+        except Exception:
+            last_error = traceback.format_exc()
             logger.error(
-                "  Agent error on attempt %d for %s %s: %s",
+                "  EXCEPTION on attempt %d for %s %s:\n%s",
                 attempt,
                 destination,
                 month,
-                exc,
+                last_error,
             )
 
     # All retries exhausted
-    logger.error("  All %d attempts failed for %s %s", cfg.max_retries, destination, month)
+    logger.error("  FAILED — all %d attempts exhausted for %s %s",
+                 cfg.max_retries, destination, month)
+    logger.error("  Last error:\n%s", last_error)
     log_run(cfg.db_path, destination, month, "error", last_error)
 
+
+# ---------------------------------------------------------------------------
+# Orchestration loop
+# ---------------------------------------------------------------------------
 
 async def run_all_searches(cfg: AppConfig) -> None:
     """
     Main orchestration loop: iterate over every destination × month,
     running the agent and sleeping between calls.
     """
+    _validate_config(cfg)
+
+    logger.info("Initialising database at %s", cfg.db_path)
     init_db(cfg.db_path)
 
     total = len(cfg.destinations) * len(cfg.months)
     logger.info(
-        "Starting scraper — %d destination(s) × %d month(s) = %d searches",
+        "Starting scraper — %d destination(s) × %d month(s) = %d total searches",
         len(cfg.destinations),
         len(cfg.months),
         total,
@@ -276,17 +396,21 @@ async def run_all_searches(cfg: AppConfig) -> None:
     for destination in cfg.destinations:
         for month in cfg.months:
             idx += 1
-            logger.info("=== Search %d/%d ===", idx, total)
+            logger.info("=" * 60)
+            logger.info("SEARCH %d / %d", idx, total)
+            logger.info("=" * 60)
 
             await _run_single_search(cfg, destination, month)
 
             # Polite random delay between runs (skip after the last one)
             if idx < total:
                 delay = random.uniform(cfg.delay_min, cfg.delay_max)
-                logger.info("  Waiting %.1f s before next search …", delay)
+                logger.info("Waiting %.1f s before next search …", delay)
                 await asyncio.sleep(delay)
 
-    logger.info("Scraper finished — %d searches completed.", total)
+    logger.info("=" * 60)
+    logger.info("SCRAPER FINISHED — %d searches completed.", total)
+    logger.info("=" * 60)
 
 
 # ---------------------------------------------------------------------------
@@ -304,5 +428,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    logger.info("Loading config from %s", args.config_json)
     cfg = config_from_json(args.config_json)
+    logger.info("Config loaded successfully")
+
     asyncio.run(run_all_searches(cfg))
